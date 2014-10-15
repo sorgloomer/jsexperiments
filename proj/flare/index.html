@@ -1,0 +1,187 @@
+<html>
+	<head>
+		<title>My first Three.js app</title>
+		<style>canvas { position: absolute; left: 0px; top: 0px; right: 0px; bottom: 0px }</style>
+	</head>
+	<body>
+		<script src="/js/three.min.js"></script>
+		<script>
+			// Our Javascript will go here.
+			var screenHeight = window.innerHeight;
+			var screenWidth = window.innerWidth;
+
+			var scene = new THREE.Scene();
+			var sceneCube = new THREE.Scene();
+			
+			var camera = new THREE.PerspectiveCamera( 75, screenWidth / screenHeight, 0.1, 1000 );
+			var cameraCube = new THREE.PerspectiveCamera( 75, screenWidth / screenHeight, 0.1, 50 );
+			
+			var renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+			renderer.setSize( screenWidth, screenHeight );
+			renderer.autoClear = false;
+			renderer.setClearColor(0);
+			document.body.appendChild( renderer.domElement );
+
+			var urlPrefix = "skybox/bridge/";
+			var urls = [ urlPrefix + "posx.jpg", urlPrefix + "negx.jpg",
+				urlPrefix + "posy.jpg", urlPrefix + "negy.jpg",
+				urlPrefix + "posz.jpg", urlPrefix + "negz.jpg" ];
+			var textureCube = THREE.ImageUtils.loadTextureCube( urls );			
+			
+			var material = new THREE.MeshLambertMaterial({
+			
+				color:			0xffffff,
+				//specular:		0xaaaaaa,
+				//shininess:		50,
+				ambient:		0xffffff,
+				emissive:		0xff00ff,
+				envMap:			textureCube,
+				combine:		THREE.MixOperation,
+				reflectivity:	0.9,
+			});
+		
+			var sphere = new THREE.Mesh(
+				new THREE.SphereGeometry(1.1, 32, 32),
+				material 
+			);
+			
+			scene.add( sphere );
+			
+			// Skybox
+			var shader = THREE.ShaderLib[ "cube" ];
+			shader.uniforms[ "tCube" ].value = textureCube;
+
+			var skyboxMaterial = new THREE.ShaderMaterial( {
+				fragmentShader: shader.fragmentShader,
+				vertexShader: shader.vertexShader,
+				uniforms: shader.uniforms,
+				depthWrite: false,
+				side: THREE.BackSide
+			} );
+
+			var meshCube = new THREE.Mesh(new THREE.BoxGeometry(10,10,10), skyboxMaterial);
+			sceneCube.add( meshCube );
+			
+			var dirLight = new THREE.DirectionalLight( 0xffffff, 0.6 );
+			dirLight.position.set(0,0,1);
+			scene.add(dirLight);
+
+			var hemiLight = new THREE.HemisphereLight( 0xffffff, 0xffffff, 0.5 );
+			hemiLight.color.setHSL( 0.6, 1, 0.6 );
+			hemiLight.groundColor.setHSL( 0.095, 1, 0.75 );
+			scene.add( hemiLight );
+			
+			camera.position.z = 5;
+			
+			var clock = new THREE.Clock();
+
+			// lens flares
+
+			var textureFlare0 = THREE.ImageUtils.loadTexture( "images/lensflare0.png" );
+			var textureFlare2 = THREE.ImageUtils.loadTexture( "images/lensflare2.png" );
+			var textureFlare3 = THREE.ImageUtils.loadTexture( "images/lensflare3.png" );
+				
+			function addLensFlare( hexcol, x, y, z ) {
+
+				var flareColor = new THREE.Color( hexcol );
+				var flareColor2 = new THREE.Color( hexcol );
+
+				var lensFlare = new THREE.LensFlare( textureFlare0, 400, 0.0, THREE.AdditiveBlending, flareColor );
+
+				lensFlare.add( textureFlare2, 512, 0.0, THREE.AdditiveBlending, flareColor2 );
+				lensFlare.add( textureFlare2, 512, 0.0, THREE.AdditiveBlending, flareColor2 );
+
+				lensFlare.add( textureFlare3, 60, 0.6, THREE.AdditiveBlending, flareColor2 );
+				lensFlare.add( textureFlare3, 70, 0.7, THREE.AdditiveBlending, flareColor2 );
+				lensFlare.add( textureFlare3, 120, 0.9, THREE.AdditiveBlending, flareColor2 );
+				lensFlare.add( textureFlare3, 70, 1.0, THREE.AdditiveBlending, flareColor2 );
+
+				lensFlare.customUpdateCallback = lensFlareUpdateCallback;
+				lensFlare.position.set(x,y,z);
+				
+				lensFlare.lensFlares.forEach( function(f) { f.originalSize = f.size; } );
+
+				scene.add( lensFlare );
+			}
+			function lensFlareUpdateCallback( object ) {
+				var f, fl = object.lensFlares.length;
+				var flare;
+				var vecX = -object.positionScreen.x * 2;
+				var vecY = -object.positionScreen.y * 2;
+				for( f = 0; f < fl; f++ ) {
+					   flare = object.lensFlares[ f ];
+					   flare.x = object.positionScreen.x + vecX * flare.distance;
+					   flare.y = object.positionScreen.y + vecY * flare.distance;
+					   flare.rotation = 0;
+					   flare.size = flare.originalSize * screenHeight / 600;
+				}
+				object.lensFlares[ 2 ].rotation = object.positionScreen.x * 1.5 + 0.79;
+			}
+			addLensFlare(0xe0a080, 15*5, 10*5, 100*5);
+
+			var mouseX, mouseY;
+			var mousePressed = false;
+			function onMouseDown(evt) {
+				mouseX = evt.x;
+				mouseY = evt.y;
+				mousePressed = true;
+			}
+			function onMouseUp(evt) {
+				mousePressed = false;
+			}
+			function onMouseMove(evt) {
+				if (mousePressed) {
+					var deltaX = evt.x - mouseX;
+					var deltaY = evt.y - mouseY;
+					mouseX = evt.x;
+					mouseY = evt.y;
+					handleMouseDrag(deltaX, deltaY);
+				}
+			}
+			
+			var cameraAngle = -1.3;
+			var cameraY = 0.3;
+
+			function handleMouseDrag(dx, dy) {
+				cameraAngle += dx * 0.0002;
+				cameraY += dy * 0.0004;
+			}
+			
+			function onWindowResize() {
+				screenHeight = window.innerHeight;
+				screenWidth = window.innerWidth;
+
+				camera.aspect = screenWidth / screenHeight;
+				camera.updateProjectionMatrix();
+				cameraCube.aspect = camera.aspect;
+				cameraCube.updateProjectionMatrix();
+				renderer.setSize( screenWidth, screenHeight );
+			}
+			window.addEventListener( 'resize', onWindowResize, false );
+			window.addEventListener( 'mousedown', onMouseDown, false );
+			window.addEventListener( 'mouseup', onMouseUp, false );
+			window.addEventListener( 'mousemove', onMouseMove, false );
+			
+			function update() {
+				camera.position.x = Math.cos(cameraAngle) * 5;
+				camera.position.y = cameraY;
+				camera.position.z = Math.sin(cameraAngle) * 5;
+				camera.lookAt( scene.position );
+			}
+			
+			function render() {
+				cameraCube.rotation.copy( camera.rotation );
+				renderer.render(sceneCube, cameraCube);
+				renderer.render(scene, camera);
+			}
+			
+			function animate() {
+				requestAnimationFrame(animate);
+				update();
+				render();
+			}
+			animate();
+		</script>
+	</body>
+</html>
+

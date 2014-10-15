@@ -1,0 +1,441 @@
+<html>
+<head>
+	<title>ai</title>
+	<style>
+		.my-playground {
+			border:1px solid 0;
+			background-color: #c0e0ff;
+		
+			display: block;
+			margin-left: auto;
+			margin-right: auto;
+		}
+		.my-header {
+			text-align: center;
+		}
+		.my-container {
+			padding: 10px 10px;
+		}
+	</style>
+	
+	<!-- Bootstrap -->
+	<link href="../../../css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body onresize="onResize();">
+	<div class="my-header">
+		<h3>Genetic Pathfinding AI</h3>
+	</div>
+	<div class="my-container">
+		<canvas id="main-canvas" class="my-playground" onclick="onCanvasClick(event);" />
+	</div>
+	<div class="container">
+		<div class="panel panel-default">
+			<div class="panel-heading">
+				<span>Options</span>
+				<div class="btn-group pull-right">
+					<a class="my-hider btn btn-link btn-sm" style="padding:0;" data-target-selector=".options-body">Hide / Show</a>
+				</div>
+			</div>
+			<div class="panel-body options-body">
+				<div class="row">
+					<div class="col-xs-4 text-right">
+						<span>Pool Fit/Breed/Mutate/Random</span>
+					</div>
+					<div class="col-xs-8">
+						<input type="number" class="my-options" data-field="poolFit" min="0" style="width: 50px;" />
+						<input type="number" class="my-options" data-field="poolBreed" min="0" style="width: 50px;" />
+						<input type="number" class="my-options" data-field="poolMutate" min="0" style="width: 50px;" />
+						<input type="number" class="my-options" data-field="poolRandom" min="0" style="width: 50px;" />
+					</div>
+				</div>
+				<div class="row">
+					<div class="col-xs-4 text-right">
+						<span>Show Plans</span>
+					</div>
+					<div class="col-xs-8">
+						<select class="my-options" data-field="showPlans">
+							<option value="none">None</option>
+							<option value="best">Best</option>
+							<option value="all">All</option>
+						</select>
+					</div>
+				</div>
+				<div class="row">
+					<div class="col-xs-4 text-right">
+						<span>Slow Motion</span>
+					</div>
+					<div class="col-xs-8">
+						<span>Enable</span>
+						<input type="checkbox" class="my-options" data-field="enableSlowmo"/>
+						<span>Factor</span>
+						<input type="number" class="my-options" data-field="slowmoMax" min="1" style="width: 50px;"/>
+						<span>Tick</span>
+						<input type="number" class="my-options" data-field="tick" min="0" step="0.001" style="width: 80px;"/>
+					</div>
+				</div>
+				<div class="row">
+					<div class="col-xs-4 text-right">
+						<span>Obstacles</span>
+					</div>
+					<div class="col-xs-8">
+						<span>Count</span>
+						<input type="number" class="my-options" data-field="obstacleCount" min="0" style="width: 50px;"/>
+						<span>Moving</span>
+						<input type="checkbox" class="my-options" data-field="obstaclesMoving"/>
+					</div>
+				</div>
+				<div class="row">
+					<div class="col-xs-4">
+						<button class="btn btn-default" onclick="reset();">Reset</button>
+					</div>
+				</div>
+			</div>
+		</div>
+	</div>
+	
+	<script src="Utils.js"></script>
+	<script src="Vector.js"></script>
+	<script src="World.js"></script>
+	<script src="GenePool.js"></script>
+	<script src="Path.js"></script>
+	<script src="PathMutator.js"></script>
+	<script src="PathScorer.js"></script>
+	<script src="GeneticAi.js"></script>
+	<script>
+		var canvas, ctx;
+		var world;
+		var aiGenetic;
+		var pathDrawer;
+		var scorer;
+		var TICK = 0.03;
+		var SLOWMO_EASE = 1.05;
+		var SLOWMO_MAX = 8;
+		var SLOWMO_TRES = -90;
+		var slowmo = 1;
+		var apath;
+		var imgShips, imgOid;
+		
+		var _options = {
+			poolFit: 6,
+			poolBreed: 6,
+			poolMutate: 6,
+			poolRandom: 6,
+			showPlans: "all",
+			enableSlowmo: true,
+			slowmoMax: 5,
+			tick: 0.03,
+			obstacleCount: 10,
+			obstaclesMoving: true,
+		};
+		
+		
+		function getOptions(dst) {
+			if (dst === undefined) dst = {};
+			Utils.copyTo(dst, _options);
+			return dst;
+		};
+		
+		function applyOptions(opts) {
+			if (opts !== undefined) {
+				Utils.copyTo(_options, opts);
+			} else {
+				opts = _options;
+			}
+			
+			if (opts.poolFit !== undefined) {
+				aiGenetic.pathPool.sizeFit = opts.poolFit;
+			}
+			if (opts.poolBreed !== undefined) {
+				aiGenetic.pathPool.sizeBreed = opts.poolBreed;
+			}
+			if (opts.poolMutate !== undefined) {
+				aiGenetic.pathPool.sizeMutate = opts.poolMutate;
+			}
+			if (opts.poolRandom !== undefined) {
+				aiGenetic.pathPool.sizeRandom = opts.poolRandom;
+			}
+			if (opts.tick !== undefined) {
+				TICK = opts.tick;
+			}
+			if (opts.slowmoMax !== undefined) {
+				SLOWMO_MAX = opts.slowmoMax;
+			}
+			if (opts.obstacleCount !== undefined) {
+				world.setObstacleCount(opts.obstacleCount);
+			}
+			if (opts.obstaclesMoving !== undefined) {
+				world.obstaclesMoving = opts.obstaclesMoving;
+			}
+			if (opts.showPlans !== undefined) {
+				if (opts.showPlans === "all") {
+					pathDrawer.pathOpacity = 0.15;
+				} else if (opts.showPlans === "best") {
+					pathDrawer.pathOpacity = 0.8;
+				}
+			}
+		};
+		
+		function elementValue(el, val) {
+			if (val === undefined) {
+				if (el.tagName === "INPUT" && el.type === "checkbox") {
+					val = el.checked;
+				} else {
+					val = el.value;
+				}
+			} else {
+				if (el.tagName === "INPUT" && el.type === "checkbox") {
+					el.checked = val;
+				} else {
+					el.value = val;
+				}
+			}
+			return val;
+		};
+		
+		function refreshOptionsPane() {
+			var els = document.querySelectorAll('.my-options');
+			for (var i = 0; i < els.length; i++) {
+				var el = els[i];
+				var fieldName = el.getAttribute("data-field");
+				var fieldValue = _options[fieldName];
+				elementValue(el, fieldValue);
+			}
+		};
+		
+		function setupOptionsPane() {
+			var el, el2, els, els2, i, j;
+			var fieldName, targetSelector;
+			refreshOptionsPane();
+			els = document.querySelectorAll('.my-options');
+			for (i = 0; i < els.length; i++) {
+				el = els[i];
+				el.addEventListener("change", function() {
+					var opts = {};
+					var fieldName = this.getAttribute("data-field");
+					opts[fieldName] = elementValue(this);
+					applyOptions(opts);
+				});
+			}
+			
+			els = document.querySelectorAll('.my-hider');
+			for (i = 0; i < els.length; i++) {
+				el = els[i];
+				el.addEventListener("click", function() {
+					var i;
+					var targetSelector = this.getAttribute("data-target-selector");
+					var els = document.querySelectorAll(targetSelector);
+					for (i = 0; i < els.length; i++) {
+						els[i].classList.toggle("hide");
+					}
+				});
+			}			
+		};
+		
+		function reset() {
+			world = new World();
+			scorer = new PathScorer(world);
+			aiGenetic = new GeneticAi(scorer, {outputInterval: TICK});
+			scorer.geneticAi = aiGenetic;
+			pathDrawer = new PathDrawer(scorer);
+			applyOptions();
+		};
+		
+		function onCanvasClick(e) {
+			world.sweet.setXY(
+				e.offsetX * 640 / canvas.offsetWidth,
+				e.offsetY * 480 / canvas.offsetHeight);
+		}
+		
+		function initView() {
+			canvas = document.getElementById("main-canvas");
+			ctx = canvas.getContext("2d");
+			onResize();
+		};
+		
+		function onResize() {
+			var scale = Math.min(
+				0.95 * window.innerWidth / 640,
+				0.95 * (window.innerHeight - 60) / 480);
+			canvas.width = scale * 640;
+			canvas.height = scale * 480;
+		};
+		
+		function init() {
+			initView();
+			initImg();
+			reset();
+			setupOptionsPane();
+			startAnimated();
+		};
+		
+		function initImg() {
+			imgShips = {};
+			World.inputs.forEach(function(inp) {
+				imgShips[inp] = new Image();
+				imgShips[inp].src = "../common/spaceship_" + inp + ".png";
+			});
+			
+			imgOid = new Image();
+			imgOid.src = "../common/asteroid.png";
+		};
+		
+		function startAnimated() {
+			requestAnimated();
+		};
+		function animated(time) {
+			requestAnimated();
+			tick(time);
+		};
+		function requestAnimated() {
+			//window.setTimeout(animated, 50);
+			window.requestAnimationFrame(animated);
+		};
+		function tick(time) {
+			var tick = TICK;
+			var bs = bestScore();
+			if (bs <= SLOWMO_TRES) {
+				slowmo *= SLOWMO_EASE;
+				if (slowmo >= SLOWMO_MAX) slowmo = SLOWMO_MAX;
+			} else {
+				slowmo /= SLOWMO_EASE;
+				if (slowmo < 1) slowmo = 1;
+			}
+			tick /= slowmo;
+			
+			world.input(aiGenetic.input());
+			world.step(tick);
+			aiGenetic.skip(tick);
+			aiGenetic.iterate();
+			aiGenetic.processInput();
+			draw(time);
+		};
+		
+		CanvasRenderingContext2D.prototype.clear = 
+			CanvasRenderingContext2D.prototype.clear
+			|| function (preserveTransform) {
+			if (preserveTransform) {
+				this.save();
+			}
+			this.setTransform(1, 0, 0, 1, 0, 0);
+			this.clearRect(0, 0, this.canvas.width, this.canvas.height);
+			if (preserveTransform) {
+				this.restore();
+			}           
+		};
+		
+		function draw(time) {
+			ctx.clear();
+			ctx.scale(canvas.height / 480, canvas.height / 480);
+			
+			if (world.gameOver > 0) {
+				ctx.fillStyle = "#A00000";
+				ctx.beginPath();
+				//ctx.moveTo(world.ship.pos.x, world.ship.pos.y);
+				ctx.arc(world.ship.pos.x, world.ship.pos.y, world.ship.rad+5, 0, Consts.TWO_PI * world.gameOver / World.GAMEOVER_TIME);
+				ctx.lineTo(world.ship.pos.x, world.ship.pos.y);
+				ctx.fill();
+			}
+			
+			ctx.strokeStyle = "#b00000";
+			world.obstacles.forEach(function(o){
+				drawOid(ctx, o);
+			});
+			ctx.strokeStyle = "#000000";
+			drawShip(ctx, world.ship);
+			
+			var r = aiGenetic._nextTick * 30 / GeneticAi.TICK | 0;
+			ctx.fillStyle = "rgb(0,"+(150 + r)+","+(30 - r)+")";
+
+			ctx.beginPath();
+			ctx.arc(world.sweet.x,world.sweet.y,8,0,Consts.TWO_PI);
+			ctx.fill();
+			
+			drawPlans();
+			
+			ctx.setTransform(1,0,0,1,0,0);
+			drawStats();
+		};
+
+		function bestScore() {
+			var best = aiGenetic.pathPool.best();
+			return (best === undefined) ? undefined : best.$score;
+		};
+		
+		function drawStats() {
+			var i;
+			var arr = aiGenetic.pathPool.genes;
+			var smin, smax;
+			smax = smin = arr[0].length;
+			for (i = 1; i < arr.length; i++) {
+				smin = Math.min(smin, arr[i].length);
+				smax = Math.max(smax, arr[i].length);
+			}
+			
+			ctx.fillStyle = "rgba(255,255,255,0.75)";
+			ctx.fillRect(5, 5, 110, 65);
+			
+			ctx.fillStyle = "black";
+			ctx.fillText("Length: " + smin + " : " + arr[0].length + " : " + smax, 10, 16);
+			ctx.fillText("$score: " + bestScore().toFixed(2), 10, 28);
+			ctx.fillText("Credits: " + world.sweetsGot, 10, 40);
+			ctx.fillText("Deaths: " + world.gameOverCount, 10, 52);
+			
+			if (slowmo > 1.5) {
+				ctx.fillStyle="#a00000";
+			} else {
+				ctx.fillStyle="rgba(0,0,0,0.2)";
+			}
+			ctx.fillText("Slow Mo! (" + Math.round(100 / slowmo) + "%)", 10, 64);
+		};
+		
+		function drawPlans() {
+			var i;
+			var arr = aiGenetic.pathPool.genes;
+			
+			PathScorer.temp1.notJustPath = false;
+			if (_options.showPlans === "all") {
+				for (i = arr.length - 1; i > 0; i--) {
+					pathDrawer.drawPath(ctx, arr[i]);
+				}
+			}
+			if (_options.showPlans === "all" || _options.showPlans === "best") {
+				pathDrawer.drawPath(ctx, arr[0], 0.5);
+			}
+			
+			PathScorer.temp1.notJustPath = true;
+		}
+		
+		function drawShip(ctx, ship) {
+			var r = ship.rad;
+			ctx.save()
+			ctx.translate(ship.pos.x, ship.pos.y);
+			ctx.rotate(ship.phi);
+			drawBall(ctx, r);
+			r *= 1.75;
+			ctx.drawImage(imgShips[world._input], -r, -r, 2*r, 2*r);
+			ctx.restore();
+		}				
+		function drawOid(ctx, ship) {
+			var r = ship.rad;
+			ctx.save()
+			ctx.translate(ship.pos.x, ship.pos.y);
+			ctx.rotate(ship.phi);
+			ctx.drawImage(imgOid, -r, -r, 2*r, 2*r);
+			drawBall(ctx, r);
+			ctx.restore();
+		}				
+
+		function drawBall(ctx, r) {
+			ctx.beginPath();
+			ctx.arc(0,0,r,0,Consts.TWO_PI);
+			//ctx.moveTo(0, 0);
+			//ctx.lineTo(r, 0);
+			ctx.stroke();
+		}				
+
+		init();
+	</script>
+</body>
+</html>
+
+

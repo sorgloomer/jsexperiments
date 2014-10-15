@@ -1,0 +1,242 @@
+<html>
+<head>
+	<title>ai</title>
+	<style>
+		canvas {
+			border:1px solid 0;
+		}
+		.playground {
+			display: block;
+			margin-left: auto;
+			margin-right: auto;
+			background-color: #c0e0ff;
+		}
+	</style>
+</head>
+<body onresize="onResize();">
+	<canvas id="main-canvas" class="playground" onclick="onCanvasClick(event);"></canvas>
+	
+	<script src="Utils.js"></script>
+	<script src="Vector.js"></script>
+	<script src="World.js"></script>
+	
+	<script src="GenePool.js"></script>
+	
+	<script src="Path.js"></script>
+	<script src="PathMutator.js"></script>
+	<script src="PathScorer.js"></script>
+	<script src="GeneticAi.js"></script>
+	<script>
+		var canvas, ctx;
+		var world;
+		var aiGenetic;
+		var pathDrawer;
+		var scorer;
+		var TICK = 0.07;
+		var TICKDIV_DELTA = 1.1;
+		var TICKDIV_MAX = 15;
+		var tickDiv = 1;
+		var apath;
+		var imgShips, imgOid;
+		
+		function onCanvasClick(e) {
+			world.sweet.setXY(
+				e.offsetX * 640 / canvas.offsetWidth,
+				e.offsetY * 480 / canvas.offsetHeight);
+		}
+		
+		function initView() {
+			canvas = document.getElementById("main-canvas");
+			ctx = canvas.getContext("2d");
+			onResize();
+		};
+		
+		function onResize() {
+			var scale = 0.95 * Math.min(
+				window.innerWidth / 640,
+				window.innerHeight / 480);
+			canvas.width = scale * 640;
+			canvas.height = scale * 480;
+		};
+		
+		function init() {
+			initView();
+			initImg();
+			world = new World();
+			scorer = new PathScorer(world);
+			aiGenetic = new GeneticAi(scorer);
+			scorer.geneticAi = aiGenetic;
+			pathDrawer = new PathDrawer(ctx, scorer);
+			startAnimated();
+		};
+		
+		function initImg() {
+			imgShips = {};
+			World.inputs.forEach(function(inp) {
+				imgShips[inp] = new Image();
+				imgShips[inp].src = "spaceship_" + inp + ".png";
+			});
+			
+			imgOid = new Image();
+			imgOid.src = "asteroid.png";
+		};
+		
+		function startAnimated() {
+			requestAnimated();
+		};
+		function animated(time) {
+			requestAnimated();
+			tick(time);
+		};
+		function requestAnimated() {
+			window.setTimeout(animated, 40);
+			//window.requestAnimationFrame(animated);
+		};
+		function tick(time) {
+			var tick = TICK;
+			var bs = bestScore();
+			if (bs <= -100) {
+				if (tickDiv < TICKDIV_MAX) tickDiv *= TICKDIV_DELTA;
+			} else {
+				tickDiv /= TICKDIV_DELTA;
+				if (tickDiv < 1) tickDiv = 1;
+			}
+			tick /= tickDiv;
+			aiGenetic.skip(tick);
+			aiGenetic.iterate();
+			draw(time);
+			world.input(aiGenetic.input());
+			world.step(tick);
+		};
+		
+		CanvasRenderingContext2D.prototype.clear = 
+			CanvasRenderingContext2D.prototype.clear
+			|| function (preserveTransform) {
+			if (preserveTransform) {
+				this.save();
+			}
+			this.setTransform(1, 0, 0, 1, 0, 0);
+			this.clearRect(0, 0, this.canvas.width, this.canvas.height);
+			if (preserveTransform) {
+				this.restore();
+			}           
+		};
+		
+		function draw(time) {
+			ctx.clear();
+			ctx.scale(canvas.height / 480, canvas.height / 480);
+			
+			if (world.gameOver > 0) {
+				ctx.fillStyle = "#A00000";
+				ctx.beginPath();
+				//ctx.moveTo(world.ship.pos.x, world.ship.pos.y);
+				ctx.arc(world.ship.pos.x, world.ship.pos.y, world.ship.rad+5, 0, Consts.TWO_PI * world.gameOver / World.GAMEOVER_TIME);
+				ctx.lineTo(world.ship.pos.x, world.ship.pos.y);
+				ctx.fill();
+			}
+			
+			ctx.strokeStyle = "#b00000";
+			world.obstacles.forEach(function(o){
+				drawOid(ctx, o);
+			});
+			ctx.strokeStyle = "#000000";
+			drawShip(ctx, world.ship);
+			
+			ctx.fillStyle = "#00a000";
+			ctx.beginPath();
+			ctx.arc(world.sweet.x,world.sweet.y,8,0,Consts.TWO_PI);
+			ctx.fill();
+			
+			drawPlans();
+			
+			ctx.setTransform(1,0,0,1,0,0);
+			drawStats();
+		};
+
+		function bestScore() {
+			var best = aiGenetic._pathPool.best();
+			return (best === undefined) ? undefined : best.$score;
+		};
+		
+		function drawStats() {
+			var i;
+			var arr = aiGenetic._pathPool.genes;
+			var smin, smax;
+			smax = smin = arr[0].length;
+			for (i = 1; i < arr.length; i++) {
+				smin = Math.min(smin, arr[i].length);
+				smax = Math.max(smax, arr[i].length);
+			}
+			
+			ctx.fillStyle = "rgba(255,255,255,0.75)";
+			ctx.fillRect(5, 5, 110, 65);
+			
+			ctx.fillStyle = "black";
+			ctx.fillText("Length: " + smin + " : " + arr[0].length + " : " + smax, 10, 16);
+			ctx.fillText("$score: " + bestScore().toFixed(2), 10, 28);
+			ctx.fillText("Credits: " + world.sweetsGot, 10, 40);
+			ctx.fillText("Deaths: " + world.gameOverCount, 10, 52);
+			
+			if (tickDiv > 1.5) {
+				ctx.fillStyle="#a00000";
+			} else {
+				ctx.fillStyle="rgba(0,0,0,0.2)";
+			}
+			ctx.fillText("Slow Mo!", 10, 64);
+		};
+		
+		function drawPlans() {
+			var i;
+			var arr = aiGenetic._pathPool.genes;
+			var maxi = arr.length;
+			//maxi = Math.min(1, maxi);
+			PathScorer.temp1.notJustPath = false;
+			for (i = 0; i < maxi; i++) {
+				pathDrawer.drawPath(world,arr[i]);
+			}
+			PathScorer.temp1.notJustPath = true;
+			
+			/*
+			if (apath !== undefined) {
+				pathDrawer.drawPath(world, apath);
+			}
+			if (apath != arr[0]) {
+				apath = arr[0];
+			}
+			*/
+		}
+		
+		function drawShip(ctx, ship) {
+			var r = ship.rad;
+			ctx.save()
+			ctx.translate(ship.pos.x, ship.pos.y);
+			ctx.rotate(ship.phi);
+			drawBall(ctx, r);
+			r *= 1.75;
+			ctx.drawImage(imgShips[world._input], -r, -r, 2*r, 2*r);
+			ctx.restore();
+		}				
+		function drawOid(ctx, ship) {
+			var r = ship.rad;
+			ctx.save()
+			ctx.translate(ship.pos.x, ship.pos.y);
+			ctx.rotate(ship.phi);
+			ctx.drawImage(imgOid, -r, -r, 2*r, 2*r);
+			drawBall(ctx, r);
+			ctx.restore();
+		}				
+
+		function drawBall(ctx, r) {
+			ctx.beginPath();
+			ctx.arc(0,0,r,0,Consts.TWO_PI);
+			//ctx.moveTo(0, 0);
+			//ctx.lineTo(r, 0);
+			ctx.stroke();
+		}				
+
+		init();
+	</script>
+</body>
+</html>
+
+

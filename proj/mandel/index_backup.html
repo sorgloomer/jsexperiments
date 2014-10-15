@@ -1,0 +1,535 @@
+<html>
+	<head>
+		<title>GPU Mandelbrot</title>
+	</head>
+	<body onload="init();">
+		<div class="options">
+			<input type="checkbox" name="cbHighp" onclick="handleCbClick(this);">
+				Use increased precision shader
+			</input>
+			<button onclick="toSaved();">
+				Jump
+			</button>
+		</div>
+		<canvas id="glcanvas" width="640" height="480" onclick="onClick(event);" onmousewheel="onWheel(event);" >
+			Your browser doesn't appear to support the HTML5 <code>&lt;canvas&gt;</code> element.
+		</canvas>
+		
+		<!--
+		Increasing precision is based on this paper
+		http://andrewthall.org/papers/df64_qf128.pdf
+		-->
+		
+		<script id="shader-fs" type="x-shader/x-vertex" data-attribs="aPosition" data-uniforms="uParamA,uParamT">
+			uniform mat2 uParamA;
+			uniform vec2 uParamT;
+			attribute vec2 aPosition;
+			varying vec2 vPosition;
+			varying vec2 vParameter;
+			void main(void) {
+				vParameter = aPosition * uParamA + uParamT;
+				vPosition = aPosition;
+				gl_Position = vec4(aPosition, 0.0, 1.0);
+			}
+		</script>
+		<script id="shader-vs" type="x-shader/x-fragment" data-uniforms="uGradient,uPixelSize,uParamA,uParamT">
+			precision highp float;
+			varying vec2 vPosition;
+			varying vec2 vParameter;
+			uniform mat2 uParamA;
+			uniform vec2 uParamT;
+			uniform sampler2D uGradient;
+			uniform vec2 uPixelSize;
+			
+			vec2 cmul(vec2 a, vec2 b) {
+				vec2 axb = a.x * b;
+				vec2 ayb = a.y * b;
+				return axb + vec2(-ayb.y, ayb.x);
+			}
+			
+			const int iterations = 180;
+			const float invIterations = 1.0/float(iterations);
+						
+			vec3 mandelbrot(vec2 c) {
+				vec2 z = vec2(0.0,0.0);
+				float cnt = 0.0;
+				for (int i = 0; i < iterations; i += 1) {
+					if  (dot(z,z) < 4.0) {
+						z = cmul(z,z) + c;
+						cnt += invIterations;
+					}
+				}
+				vec4 gr = texture2D(uGradient, vec2(cnt, 0.5));
+				return gr.rgb;
+			}
+			void main(void) {
+				vec3 c1 = mandelbrot(vParameter);
+				gl_FragColor = vec4(c1, 1.0);
+			}
+		</script>
+		<script id="shader-hp-vs" type="x-shader/x-fragment" data-uniforms="uGradient,uPixelSize,uParamA,uParamT" >
+			precision highp float;
+			varying vec2 vPosition;
+			varying vec2 vParameter;
+			uniform mat2 uParamA;
+			uniform vec2 uParamT;
+			uniform sampler2D uGradient;
+			uniform vec2 uPixelSize;
+			
+			
+			const float one = 1.0 + 5e-7;
+			const float SPLIT = 4096.0 + 1.0;
+			//const float one = 1.0;
+			
+			vec2 _quickTwoSum(float a, float b) {
+				//float s = (a + b) * one;
+				float s = a + b;
+				//float e = b - (s - a);
+				//float e = b - ((a + b) - a);
+				float e = a - s + b;
+				return vec2(s, e);
+			}
+			
+			vec2 _split(float c) {
+				float t = c * SPLIT;
+				float c_hi = t - (t - c) * one;
+				float c_lo = c - c_hi;
+				return vec2(c_hi, c_lo);
+			}
+			
+			vec4 _splitComp(vec2 c) {
+				vec2 t = c * SPLIT;
+				vec2 c_hi = t - (t - c) * one;
+				vec2 c_lo = c - c_hi;
+				return vec4(c_hi, c_lo).xzyw;
+			}
+			
+			vec2 twoSum(float a, float b) {
+				float s = (a + b) * one;
+				float v = (s - a) * one;
+				float e = (a - (s - v)) + (b - v);
+				return vec2(s, e);
+			}
+			
+			vec4 twoSumComp(vec2 a, vec2 b) {
+				vec2 s = (a + b) * one;
+				vec2 v = (s - a) * one;
+				vec2 e = (a - (s - v)) + (b - v);
+				return vec4(s, e).xzyw;
+			}
+
+			vec2 twoProd(float a, float b) {
+				float p = a * b;
+				vec4 S = _splitComp(vec2(a,b));
+				float err = ((S.x * S.z - p)
+					+ S.x * S.w + S.y * S.z)
+					+ S.y * S.w;
+				return vec2(p, err);
+			}
+			
+			vec2 df_add(vec2 a, vec2 b) {
+				vec4 st = twoSumComp(a, b);
+				st.y += st.z;
+				st.xy = _quickTwoSum(st.x, st.y);
+				st.y += st.w;
+				st.xy = _quickTwoSum(st.x, st.y);
+				return st.xy;
+			}
+			
+			vec2 df_mult(vec2 a, vec2 b) {
+				vec2 p = twoProd(a.x, b.x);
+				p.y += a.x * b.y;
+				p.y += a.y * b.x;
+				return _quickTwoSum(p.x, p.y);
+			}
+						
+			vec4 df_cmul(vec4 a, vec4 b) {
+				return vec4(
+					df_add(df_mult(a.xy, b.xy), -df_mult(a.zw, b.zw)),
+					df_add(df_mult(a.xy, b.zw),  df_mult(a.zw, b.xy))
+				);
+			}
+			
+			float df_comp_len2_f(vec4 a) {
+				return a.x * a.x + a.z * a.z;
+			}
+			
+			const int iterations = 240;
+			const float invIterations = 1.0/float(iterations);
+			
+			vec3 highp_mandelbrot(vec2 cx, vec2 cy) {
+				vec4 z = vec4(0.0,0.0,0.0,0.0);
+				float cnt = 0.0;
+				for (int i = 0; i < iterations; i += 1) {
+					if  (df_comp_len2_f(z) < 4.0) {
+						z = df_cmul(z,z);
+						z.xy = df_add(z.xy, cx);
+						z.zw = df_add(z.zw, cy);
+						cnt += invIterations;
+					}
+				}
+				vec4 gr = texture2D(uGradient, vec2(cnt, 0.5));
+				return gr.rgb;
+			}
+			
+			void main(void) {
+			
+			
+				vec2 vx =
+					df_add(
+						df_add(						
+							twoProd(vPosition.x, uParamA[0].x), 
+							twoProd(vPosition.y, uParamA[0].y)),
+						vec2(uParamT.x, 0.0));
+				
+				vec2 vy =
+					df_add(
+						df_add(						
+							twoProd(vPosition.x, uParamA[1].x), 
+							twoProd(vPosition.y, uParamA[1].y)),
+						vec2(uParamT.y, 0.0));
+					
+				vec3 c1 = highp_mandelbrot(vx, vy);
+				gl_FragColor = vec4(c1, 1.0);
+				
+				
+				/*
+				// Determine precision
+				float x = ( 1.0 - ( gl_FragCoord.x / 640.0 ));
+				
+				float y = ( gl_FragCoord.y / 480.0 ) * 26.0;
+				float yp = pow( 2.0, floor(y) );
+				float fade = fract( yp + fract(x) );
+				if (fract(y) < 0.9)
+					gl_FragColor = vec4( vec3( fade ), 1.0 );
+				else
+					gl_FragColor = vec4( 0.0 );
+				*/
+		  
+				/*
+				float x = vPosition.x;
+				float y = vPosition.y;
+				
+				float tmp = pow(2.0, floor(y * 50.00));
+				float r = (tmp + 1.0) * x;
+				float g = r - tmp * x;
+				
+				
+				gl_FragColor = vec4(r*1e-30,g,0.0, 1.0);
+				*/
+				/*
+				float x = vPosition.x;
+				float y = vPosition.y;
+				vec4 t = _splitComp(vec2(x*y,x+y));
+				t.y *= 4096.0;
+				gl_FragColor = vec4(t.xy, 0.0, 1.0);
+				*/
+			}
+		</script>
+		<script>
+			var center = [-0.65, 0], centerTo = [-0.65, 0];
+			var zoom = 1.4, zoomTo = 1.4;
+			var aspect = 1024.0 / 768;
+			var follow = 0.2;
+			var zooma = 1.1;
+			var gradientFile = "gradient.png";
+			
+			var gl;
+			var vbSprite;
+			var ibSprite;
+			var shaderProgram;
+			var shaderProgramHp;
+			var gradientTex;
+			var canvas;
+			var highPrecision = false;
+
+			function handleCbClick(cb) {
+				highPrecision = cb.checked;
+			}
+			
+			function onClick(event) {
+				centerTo[0] = center[0] + ((event.offsetX - canvas.width / 2) / canvas.height) * 2.0 * zoom;
+				centerTo[1] = center[1] - ((event.offsetY - canvas.height / 2) / canvas.height) * 2.0 * zoom;
+			}
+			
+			function onWheel(event) {
+				if (event.wheelDelta < 0) {
+					zoomTo *= zooma;
+				} else {
+					zoomTo /= zooma;
+				}
+			}
+			
+			function init() {
+				canvas = document.getElementById("glcanvas");
+				gl = initGL(canvas);
+				
+				if (gl) {
+					initShaders();
+					initBuffers();
+					//initFrameBuffers();
+					loadResources();
+				}
+			}
+			function clearBuffers() {
+				if (frameBuffers) {
+					frameBuffers.forEach(function(fb) {
+						gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+						gl.clearColor(0.0, 0.0, 0.0, 0.0);
+						gl.clear(gl.COLOR_BUFFER_BIT);
+					});
+				}
+			}
+			function getAttribs(id, attrib) {
+				var elem = document.getElementById(id);
+				if (!elem) {
+					return null;
+				}
+				var attr = elem.getAttribute(attrib);
+				if (attr) {
+					return attr.split(',');
+				} else {
+					return [];
+				}
+			}
+			function getShader(id) {
+				var shaderScript = document.getElementById(id);
+				if (!shaderScript) {
+					return null;
+				}
+
+				var str = "";
+
+				var k = shaderScript.firstChild;
+				while (k) {
+					if (k.nodeType == 3)
+						str += k.textContent;
+					k = k.nextSibling;
+				}
+
+				var shader;
+				if (shaderScript.type == "x-shader/x-fragment") {
+					shader = gl.createShader(gl.FRAGMENT_SHADER);
+				} else if (shaderScript.type == "x-shader/x-vertex") {
+					shader = gl.createShader(gl.VERTEX_SHADER);
+				} else {
+					return null;
+				}
+
+				gl.shaderSource(shader, str);
+				gl.compileShader(shader);
+
+				if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+					alert(gl.getShaderInfoLog(shader));
+					return null;
+				}
+
+				return shader;
+			}
+			
+			function getShaderProgram(shaders, attribs, uniforms) {
+				var program = gl.createProgram();
+				
+				if (attribs === undefined) {
+					attribs = [];
+					shaders.forEach(function(item){
+						var cattr = getAttribs(item, "data-attribs");
+						attribs = attribs.concat(cattr);
+					});
+				}
+				if (uniforms === undefined) {
+					uniforms = [];
+					shaders.forEach(function(item){
+						var cattr = getAttribs(item, "data-uniforms");
+						uniforms = uniforms.concat(cattr);
+					});
+				}
+				
+				shaders.forEach(function(item){
+					var shader = getShader(item);
+					gl.attachShader(program, shader);
+				});
+				gl.linkProgram(program);
+				if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+					alert("Could not initialise shaders");
+				}
+				gl.useProgram(program);
+				if (attribs) {
+					attribs.forEach(function(item){
+						var loc = gl.getAttribLocation(program, item);
+						gl.enableVertexAttribArray(loc);
+						program[item] = loc;
+					});
+				}
+				if (uniforms) {
+					uniforms.forEach(function(item){
+						var loc = gl.getUniformLocation(program, item);
+						program[item] = loc;
+					});
+				}
+				return program;
+			}
+			function initGL(canvas) {
+				var gl = null;
+				try {
+					gl = canvas.getContext("webgl") || canvas.getContext("experimental-webgl");
+					gl.viewportWidth = canvas.width;
+					gl.viewportHeight = canvas.height;
+					aspect = canvas.width/canvas.height;
+					//gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+				} catch(e) {}
+				if (!gl) {
+					alert("Unable to initialize WebGL. Your browser may not support it.");
+					gl = null;
+				}
+				if (!gl.getExtension("OES_texture_float")) {
+					alert("This sddemo requires the OES_texture_float extension");
+				}
+				gl.disable(gl.DEPTH_TEST);
+				return gl;
+			}
+			function initShaders() {
+				var vShader, fShader;
+				var program;
+				shaderProgram = getShaderProgram(["shader-vs", "shader-fs"]);
+				shaderProgramHp = getShaderProgram(["shader-hp-vs", "shader-fs"]);
+			}
+			function initBuffers() {
+				var vertices = [-1, -1, -1, +1, +1, +1, +1, -1];
+				var indices = [0, 1, 2, 0, 2, 3];
+				
+				vbSprite = gl.createBuffer();
+				gl.bindBuffer(gl.ARRAY_BUFFER, vbSprite);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+				vbSprite.itemSize = 2;
+				vbSprite.numItems = vertices.length / vbSprite.itemSize;
+				
+				ibSprite = gl.createBuffer();
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibSprite);
+				gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+				ibSprite.numItems = indices.length;
+			}
+			function createTextureFramebuffer(width, height) {
+				if (!width) width = 128;
+				if (!height) height = width;
+				
+				var rttFramebuffer = gl.createFramebuffer();
+				gl.bindFramebuffer(gl.FRAMEBUFFER, rttFramebuffer);
+				rttFramebuffer.width = width;
+				rttFramebuffer.height = height;
+				
+				rttTexture = gl.createTexture();
+				gl.bindTexture(gl.TEXTURE_2D, rttTexture);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+				gl.texImage2D(
+					gl.TEXTURE_2D, 0, gl.RGBA, 
+					width,
+					height,
+					0, gl.RGBA,
+					gl.FLOAT,
+					null);
+				rttFramebuffer.texture = rttTexture;
+				
+				gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rttTexture, 0);
+				gl.bindTexture(gl.TEXTURE_2D, null);
+				
+				/*
+				// if depth test is needed
+					var renderbuffer = gl.createRenderbuffer();
+					gl.bindRenderbuffer(gl.RENDERBUFFER, renderbuffer);
+					gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, rttFramebuffer.width, rttFramebuffer.height);
+					gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, renderbuffer);
+					gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+				*/
+				gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+				return rttFramebuffer;
+			}
+			var frameBuffers;
+			function initFrameBuffers() {
+				var size = gl.viewportWidth;
+				frameBuffers=[createTextureFramebuffer(size),createTextureFramebuffer(size)];
+				clearBuffers();
+				gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+			}
+
+			function handleLoadedTexture(texture) {
+				gl.bindTexture(gl.TEXTURE_2D, texture);
+				gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+				gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, texture.image);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+				gl.bindTexture(gl.TEXTURE_2D, null);
+			}
+			
+			function loadResources() {
+				tex = gl.createTexture();
+				tex.image = new Image();
+				tex.image.onload = function() {
+					handleLoadedTexture(tex);
+					startAnimation();
+				}
+				tex.image.src = gradientFile;
+				gradientTexture = tex;
+			}
+			
+			var startTime;
+			function startAnimation() {
+				startTime = Date.now();
+				scheduleTick();
+			}
+			
+			function scheduleTick() {
+				requestAnimationFrame(tick);
+				//setTimeout(tick, 500);
+			}
+			function tick() {
+				var currentTime = Date.now() - startTime;
+				process();
+				drawScene(currentTime);
+				scheduleTick();
+			}
+			function process() {
+				zoom += (zoomTo - zoom) * follow;
+				center[0] += (centerTo[0] - center[0]) * follow;
+				center[1] += (centerTo[1] - center[1]) * follow;
+			}
+			function toSaved() {
+				centerTo[0] = -0.7323781988779966;
+				centerTo[1] = 0.28873915929758537;
+				zoomTo = 0.000002;
+			}
+			setTimeout(function() {
+				toSaved();
+				setTimeout(function() {
+					var e = document.querySelector("input[type='checkbox']");
+					e.checked = true;
+					e.onclick(e);
+				}, 1600);
+			}, 100);
+			function drawScene(currentTime) {
+				var i;
+
+				var shader = highPrecision ? shaderProgramHp : shaderProgram;
+				gl.useProgram(shader);
+				gl.bindBuffer(gl.ARRAY_BUFFER, vbSprite);
+				gl.vertexAttribPointer(shader.aPosition, vbSprite.itemSize, gl.FLOAT, false, 0, 0);
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibSprite);
+				
+				gl.activeTexture(gl.TEXTURE0);
+				gl.bindTexture(gl.TEXTURE_2D, gradientTexture);
+				
+				gl.uniformMatrix2fv(shader.uParamA, false, [zoom * aspect, 0, 0, zoom]);
+				gl.uniform2f(shader.uParamT, center[0], center[1]);
+				gl.uniform2f(shader.uPixelSize, zoom / canvas.height, zoom / canvas.height);
+								
+				gl.uniform1i(shader.uGradient, 0);
+								
+				gl.drawElements(gl.TRIANGLES, ibSprite.numItems, gl.UNSIGNED_SHORT, 0);
+			}
+		</script>		
+	</body>
+</html>
+

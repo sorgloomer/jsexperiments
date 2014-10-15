@@ -1,0 +1,5 @@
+<Project DefaultTargets="Compile" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+	<Target Name="Compile">
+		<CSC Sources="octree.cs"/>
+	</Target>
+</Project>

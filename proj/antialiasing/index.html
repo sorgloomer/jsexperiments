@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Octree volumetric fog renderer (Galaxy)</title>
+		<style>
+			canvas {border:1px black solid;}
+		</style>
+	</head>
+	<body onload="init();">
+		<canvas id="glcanvas" width="80" height="80" onclick="onClick(event);" onmousewheel="onWheel(event);" >
+			Your browser doesn't appear to support the HTML5 <code>&lt;canvas&gt;</code> element.
+		</canvas>
+				
+		<script id="shader-v" type="x-shader/x-vertex"
+			data-attribs="aPosition,aWeight,aColor"
+			data-uniforms="uResolution,uAffine,uTranslate">
+			precision highp float;
+			
+			attribute vec2 aPosition;
+			attribute float aWeight;
+			attribute vec4 aColor;
+			
+			uniform vec2 uResolution;
+			uniform mat2 uAffine;
+			uniform vec2 uTranslate;
+			
+			varying vec4 vColor;
+			varying float vWeight;
+			
+			void main() {
+				vColor = aColor;
+				vWeight = aWeight;
+				
+				vec2 pos = aPosition * uAffine + uTranslate + vec2(0.5);
+				gl_Position = vec4((pos / uResolution) * 2.0 - vec2(1.0), 0.5, 1.0);
+			}
+		</script>
+		<script id="shader-f" type="x-shader/x-fragment">
+			precision mediump float;
+			varying vec4 vColor;
+			varying float vWeight;
+			float kernel(float w) {
+				return w;
+				//w = smoothstep(0.0, 1.0, 1.0 - w);
+				//return 1.0 - w*w;
+			}
+			void main() {
+				float w = vWeight;
+				/*
+				if (w < 0.1) {
+					gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+				} else if (w > 0.8){
+					gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);
+				} else {
+					gl_FragColor = vec4(0.0, 0.0, 1.0, 1.0);
+				}
+				*/
+				gl_FragColor = vColor;
+				gl_FragColor.a *= kernel(vWeight);
+			}
+		</script>
+		
+		<script src="/js/webgl-helper.js"></script>
+		<script>
+			var gl, canvas;
+			var state = 0;
+			
+			var res = {};
+			res.vertices = [
+				-30, -1, 0,   -30, 0, 1,   -30, 1, 0,
+				- 5, -1, 0,   - 5, 0, 1,   - 5, 1, 0,
+				+ 5,-10, 1,   + 5, 0, 1,   + 5, 1, 0,
+				+30,-10, 1,   +30, 0, 1,   +30, 1, 0,
+			];
+			res.indices = [
+				0, 3, 4, 0, 1, 4, 1, 4, 5, 1, 2, 5,
+				3, 6, 7, 3, 4, 7, 4, 7, 8, 4, 5, 8,
+				6, 9,10, 6, 7,10, 7,10,11, 7, 8,11,
+				];
+			res.itemCount = res.indices.length;
+			res.vb = null;
+			res.ib = null;
+			res.shader = null;
+			
+			
+			function onClick(event) {
+				// event.offserX
+				// event.offserY
+				state++;
+				if (state > 6) state = 0;
+			}
+			
+			function onWheel(event) {
+				// event.wheelDelta
+			}
+			
+			function initCustom() {
+				res.vb = gl.createBuffer();
+				res.ib = gl.createBuffer();
+				gl.bindBuffer(gl.ARRAY_BUFFER, res.vb);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(res.vertices), gl.STATIC_DRAW);
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, res.ib);
+				gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(res.indices), gl.STATIC_DRAW);
+				
+				gl.enable(gl.BLEND);
+				gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+				
+				res.shader = GlHelper.getShaderProgram(["shader-v", "shader-f"]);
+				gl.useProgram(res.shader);
+				gl.enableVertexAttribArray(res.shader.aPosition);
+				gl.enableVertexAttribArray(res.shader.aWeight);
+				gl.disableVertexAttribArray(res.shader.aColor);
+				gl.vertexAttribPointer(res.shader.aPosition, 2, gl.FLOAT, false, 3*4, 0);
+				gl.vertexAttribPointer(res.shader.aWeight, 1, gl.FLOAT, false, 3*4, 2*4);
+				gl.vertexAttrib4f(res.shader.aColor, 0, 0, 0, 1);
+			}
+
+			function process(currentTime) {
+			}
+			
+			function drawScene(currentTime) {
+				var angle;
+				gl.clearColor(1.0, 1.0, 1.0, 1.0);
+				gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+				
+				switch (state) {
+					default:
+						angle = currentTime * 0.0002;
+						break;
+					case 1:
+						angle = 0;
+						break;
+					case 2:
+						angle = Math.PI / 2;
+						break;
+					case 3:
+						angle = Math.PI / 3;
+						break;
+					case 4:
+						angle = Math.PI / 4;
+						break;
+					case 5:
+						angle = Math.PI / 16;
+						break;
+					case 6:
+						angle = currentTime * 0.00002;
+						break;
+				}
+				gl.uniformMatrix2fv(res.shader.uAffine, false,
+					[Math.cos(angle), Math.sin(angle),
+					-Math.sin(angle), Math.cos(angle)]);
+				gl.uniform2f(res.shader.uTranslate, (canvas.width/2)|0, (canvas.height/2)|0);
+				gl.uniform2f(res.shader.uResolution, canvas.width|0, canvas.height|0);
+				
+				gl.drawElements(gl.TRIANGLES, res.itemCount, gl.UNSIGNED_SHORT, 0);
+			}
+			
+			
+			
+			function init() {
+				canvas = document.getElementById("glcanvas");
+				gl = initGL(canvas);
+				if (gl) {
+					initCustom();
+					startAnimation();
+				}
+			}
+			
+			function initGL(canvas) {
+				var gl = GlHelper.initGL(canvas, {antialias: false});
+				if (!gl) {
+					alert("Unable to initialize WebGL. Your browser may not support it.");
+					gl = null;
+				}
+				gl.disable(gl.DEPTH_TEST);
+				return gl;
+			}
+									
+			var startTime;
+			function startAnimation() {
+				startTime = +Date.now();
+				scheduleTick();
+			}
+			
+			function scheduleTick() {
+				requestAnimationFrame(tick);
+				//setTimeout(tick, 500);
+			}
+			function tick() {
+				var currentTime = +Date.now() - startTime;
+				process(currentTime);
+				drawScene(currentTime);
+				scheduleTick();
+			}
+		</script>		
+	</body>
+</html>
+

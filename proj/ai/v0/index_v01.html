@@ -1,0 +1,312 @@
+<html>
+<head>
+	<title>ai</title>
+	<style>
+		canvas{border:1px solid 0}
+	</style>
+</head>
+<body>
+	<canvas id="main-canvas" width="640" height="480" onclick="onClick(event);"></canvas>
+	
+	<script src="Vector.js"></script>
+	<script>
+		var canvas, ctx;
+		var world;
+		
+		function onClick(e) {
+			world.sweet.setXY(e.offsetX, e.offsetY);
+		}
+		
+		function initView() {
+			canvas = document.getElementById("main-canvas");
+			ctx = canvas.getContext("2d");
+		};
+		function init() {
+			initView();
+			world = new World();
+			requestAnimated();
+		};
+		function startAnimated() {
+			requestAnimated();
+		};
+		function animated(time) {
+			requestAnimated();
+			tick(time);
+		};
+		function requestAnimated() {
+			window.requestAnimationFrame(animated);
+		};
+		function tick(time) {
+			draw(time);
+			world.step(World.TICK);
+			world.ai();			
+		};
+		
+		CanvasRenderingContext2D.prototype.clear = 
+			CanvasRenderingContext2D.prototype.clear
+			|| function (preserveTransform) {
+			if (preserveTransform) {
+				this.save();
+			}
+			this.setTransform(1, 0, 0, 1, 0, 0);
+			this.clearRect(0, 0, this.canvas.width, this.canvas.height);
+			if (preserveTransform) {
+				this.restore();
+			}           
+		};
+		
+		function draw(time) {
+			ctx.clear();
+			ctx.strokeStyle = "#000000";
+			drawShip(ctx, world.ship);
+			
+			ctx.strokeStyle = "#800000";
+			world.obstacles.forEach(function(o){
+				drawShip(ctx, o);
+			});
+			
+			ctx.fillStyle = "#00a000";
+			ctx.beginPath();
+			ctx.arc(world.sweet.x,world.sweet.y,8,0,Consts.TWO_PI);
+			ctx.fill();
+		};
+		
+		function drawShip(ctx, ship) {
+			var r = ship.rad;
+			ctx.save()
+			ctx.translate(ship.pos.x, ship.pos.y);
+			ctx.rotate(ship.phi);
+			
+			ctx.beginPath();
+			ctx.arc(0,0,r,0,Consts.TWO_PI);
+			ctx.moveTo(0, 0);
+			ctx.lineTo(r, 0);
+			ctx.stroke();
+			ctx.restore();
+		}
+		
+		function Ball() {
+			this.rad = 30;
+			this.pos = new Vector();
+			this.vel = new Vector(10);
+			this.phi = 0;
+			this.omega = 0.1;
+			
+			this.acc = 30.1;
+			this.beta = 0.01;
+		};
+		
+		Ball.temp1 = new Vector();
+		
+		Ball.prototype.set = function(o) {
+			this.rad = o.rad;
+			this.pos.set(o.pos);
+			this.vel.set(o.vel);
+			this.phi = o.phi;
+			this.omega = o.omega;
+			
+			this.acc = o.acc;
+			this.beta = o.beta;
+			return this;
+		}
+		Ball.prototype.clone = function() {
+			return new Ball().set(this);
+		}
+		
+		Ball.prototype.step = function(dt) {
+			this.pos.addTo(Ball.temp1.set(this.vel).mulTo(dt));
+			this.vel.addTo(Ball.temp1.setAngle(this.phi).mulTo(this.acc*dt));
+			
+			this.phi += this.omega * dt;
+			this.omega += this.beta * dt;
+		};
+				
+		function World() {
+			var i;
+			this.ship = new Ball();
+			this.width = 640;
+			this.height = 480;
+			this.ship.pos = new Vector(this.width, this.height).mulTo(0.5);
+			this.center = new Vector(this.width/2, this.height/2);
+			this.sweet = this.center.clone();
+			this.obstacles = [new Ball(), new Ball(), new Ball(), new Ball()];
+			this.obstacles[3].pos.setXY(this.center.x,this.center.y-185);
+			this.obstacles[2].pos.setXY(this.center.x,this.center.y-125);
+			this.obstacles[1].pos.setXY(this.center.x,this.center.y-65);
+			this.obstacles[0].pos.setXY(this.center.x,this.center.y+65);
+			this.obstacles.forEach(function(o){
+				o.vel.setXY(0,0);
+				o.acc = 0;
+				o.omega = 0;
+				o.beta = 0;
+			});
+		}
+		
+		World.prototype.set = function(o) {
+			var i;
+			this.ship.set(o.ship);
+			this.width = o.width;
+			this.height = o.height;
+			this.center.set(o.center);
+			this.sweet.set(o.sweet);
+			
+			var olen = o.obstacles.length;
+			if (this.obstacles.length !== olen) {
+				this.obstacles = new Array(olen);
+				for (i = 0; i < olen; i++) {
+					this.obstacles[i] = o.obstacles[i].clone();
+				}
+			} else {
+				for (i = 0; i < olen; i++) {
+					this.obstacles[i].set(o.obstacles[i]);
+				}
+			}
+			return this;
+		}
+		World.prototype.clone = function(o) {
+			return new World().set(o);
+		}
+		
+		World.prototype.stepIt = function(dt) {
+			this.ship.step(dt);
+			this._collideBall(this.ship);
+		}
+		World.prototype.step = function(dt) {
+			while (dt > 0.1) {
+				this.stepIt(0.1);
+				dt -= 0.1;
+			}
+			this.stepIt(dt);
+		}
+		
+		World.prototype.input = function(str) {
+			if (str === "l") {
+				this.ship.acc = 0;
+				this.ship.beta = -5;
+			} else if (str === "r") {
+				this.ship.acc = 0;
+				this.ship.beta = +5;
+			} else if (str === "a") {
+				this.ship.acc = 100;
+				this.ship.beta = 0;
+			} else if (str === "al") {
+				this.ship.acc = 100;
+				this.ship.beta = -5;
+			} else if (str === "ar") {
+				this.ship.acc = 100;
+				this.ship.beta = +5;
+			} else {
+				this.ship.acc = 0;
+				this.ship.beta = 0;
+			}
+		}
+				
+		function fillWithRandom(what,withWhat, i, maxi) {
+			i = i || 0;
+			maxi = maxi || what.length;
+			var choices = withWhat.length;
+			for (;i < maxi; i++) {
+				what[i] = withWhat[Math.floor(Math.random() * choices)];
+			}
+			return what;
+		}
+		
+		function arrayCopy(what,withWhat, i, maxi) {
+			i = i || 0;
+			maxi = maxi || what.length;
+			for (;i < maxi; i++) {
+				what[i] = withWhat[i];
+			}
+			return what;
+		}
+
+		
+		World.prototype.scoreState = function() {
+			var self = this;
+			var score = this.ship.pos.dist(this.sweet);
+			var tmp = Math.abs(this.ship.omega);
+			score += tmp*tmp*0.03;
+			score += this.ship.vel.abs() * 0.05;
+			
+			this.obstacles.forEach(function(o){
+				if (self.ship.pos.dist(o.pos) < (o.rad + self.ship.rad)) score += 100000;
+			});
+			return score;
+		}
+		
+		World.prototype.scorePath = function(inputs) {
+			var cdist = 0;
+			var temp1 = World.temp1;
+			temp1.set(this);
+			
+			ctx.moveTo(temp1.ship.pos.x, temp1.ship.pos.y);
+			
+			inputs.forEach(function(input){
+				var newStyle;
+				temp1.input(input);
+				temp1.step(World.INPUT_TICK);
+				cdist +=  temp1.scoreState();
+				
+				ctx.lineTo(temp1.ship.pos.x, temp1.ship.pos.y);
+			});
+			return cdist;
+		}
+		
+		function rotateLeft(arr) {
+			var i = 0, maxi = arr.length-1;
+			var tmp = arr[0];
+			for (; i < maxi; i++) {
+				arr[i]=arr[i+1];
+			}
+			arr[maxi] = tmp;
+		}
+		World.prototype.ai = function() {					
+			var self = this;
+			var i, halfi;
+			var bestScore, bestInput = null;
+			var rand_arr = World.temp_input_array;
+			
+			ctx.save();
+			ctx.strokeStyle = "rgba(0,0,150,0.1)"
+			ctx.beginPath();
+
+			i = 0;
+			World.inputs.forEach(function(input1){
+				for (var j = 0; j < World.AI_PATHS; j++) {
+					fillWithRandom(rand_arr, World.inputs);
+					rand_arr[0] = input1;
+					var cscore = self.scorePath(rand_arr);
+					if (bestInput === null || bestScore > cscore) {
+						bestScore = cscore;
+						bestInput = rand_arr[0];
+					}
+				}
+			});
+			
+			ctx.stroke();
+			ctx.restore();
+			
+			this.input(bestInput);
+		};
+		
+		World.prototype._collideBall = function(ball) {
+			if (ball.pos.x < ball.rad) ball.vel.x = +Math.abs(ball.vel.x);
+			if (ball.pos.x > this.width-ball.rad) ball.vel.x = -Math.abs(ball.vel.x);
+			if (ball.pos.y < ball.rad) ball.vel.y = +Math.abs(ball.vel.y);
+			if (ball.pos.y > this.height-ball.rad) ball.vel.y = -Math.abs(ball.vel.y);
+		};
+		
+		World.inputs = ["","l","r","a","al","ar"];
+		World.temp_input_array = new Array(20);
+		World.TICK = 0.02;
+		World.INPUT_TICK = 0.2;
+		World.AI_PATHS = 20;
+		World.temp1 = new World();
+		World.temp2 = new World();
+		
+		init();
+	</script>
+</body>
+</html>
+
+

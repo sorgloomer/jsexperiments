@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>GPU Sparse Octree Raycasting</title>
+	</head>
+	<body onload="init();">
+		<canvas id="glcanvas" width="640" height="480" onclick="onClick(event);" onmousewheel="onWheel(event);" >
+			Your browser doesn't appear to support the HTML5 <code>&lt;canvas&gt;</code> element.
+		</canvas>
+		<div>
+			<label>
+				<input type="checkbox" onclick="onCheckClick(this, event);" checked>
+				Show Colors
+			</label>
+		</div>
+		
+		<script id="shader-vs" type="x-shader/x-vertex" data-attribs="aPosition">
+			attribute vec2 aPosition;
+			varying vec2 vPosition;
+			void main(void) {
+				vPosition = aPosition;
+				gl_Position = vec4(aPosition, 0.0, 1.0);
+			}
+		</script>
+		
+		<!--
+		Octtree structure based on:
+		http://perso.telecom-paristech.fr/~boubek/papers/APO/APO.pdf
+		-->
+		<script id="shader-fs" type="x-shader/x-fragment" data-uniforms="uIterations,uTexture,uTextureSize,uViewRot,uViewPos">
+			precision highp float;
+			precision highp int;
+			
+			uniform int uIterations;
+			uniform sampler2D uTexture;
+			uniform float uTextureSize;
+
+			uniform mat3 uViewRot;
+			uniform vec3 uViewPos;
+			
+			varying vec2 vPosition;
+			
+			struct Ray {
+				vec3 eye;
+				vec3 dir;
+			};
+			
+			struct Intersection {
+				vec3 point;
+				bool exists;
+			};
+		
+			struct Cube {
+				vec3 center;
+				float a;
+			};
+
+			struct Index {
+				vec2 uv;
+			};
+			
+			struct IndexIf {
+				Index index;
+				bool exists;
+			};
+	
+			const Intersection FALSE_INTERSECTION = Intersection(vec3(0.0), false);
+			const Cube ROOT_CUBE = Cube(vec3(0.0), 1.0);
+			
+			const float EPSILON = 1e-6;
+			const vec4 BACKGROUND_COLOR = vec4(0.9, 0.7, 0.5, 1.0);
+			const IndexIf FALSE_INDEX = IndexIf(Index(vec2(0.0)), false);
+			
+			const float halfCubeDiag = 0.8660254;
+			
+			const bool SHOW_FRAME = %SHOW_FRAME%;
+			const int MAX_DEPTH = 8;
+			const int MARCH_COUNT = 50;
+
+			Index startIndex;
+			
+			Cube traverse_cube;
+			vec4 traverse_color;
+			bool traverse_found;
+			int traverse_depth;
+			int traverse_cycles;
+			int march_cycles;
+			
+			vec4 indexTex(Index index) {
+				return texture2D(uTexture, index.uv);
+			}
+			
+			Index indexNode(vec3 pixel) {
+				return Index((vec2(
+					pixel.r * 255.0 + floor(pixel.b * (255.0 / 16.0))  * 256.0,
+					pixel.g * 255.0 + mod(pixel.b * 255.0, 16.0)* 256.0
+				) + vec2(0.5)) / uTextureSize);
+			}
+			
+			Index addIndex(Index idx, int cnt) {
+				float isize = 1.0 / uTextureSize;
+				idx.uv.x += isize * float(cnt);
+				idx.uv.y += isize * floor(idx.uv.x);
+				idx.uv.x = fract(idx.uv.x);
+				return idx;
+			}
+			
+			vec4 intersectPlaneX(Ray ray, float x) {
+				float t = (x - ray.eye.x) / ray.dir.x;
+				return vec4(x, ray.eye.yz + t * ray.dir.yz, t);
+			}
+			vec4 intersectPlaneY(Ray ray, float y) {
+				float t = (y - ray.eye.y) / ray.dir.y;
+				return vec4(y, ray.eye.xz + t * ray.dir.xz, t).yxzw;
+			}
+			vec4 intersectPlaneZ(Ray ray, float z) {
+				float t = (z - ray.eye.z) / ray.dir.z;
+				return vec4(ray.eye.xy + t * ray.dir.xy, z, t);
+			}
+			
+			bool aabContainsPoint(vec3 cmin, vec3 cmax, vec3 point) {
+				return
+					(point.x >= cmin.x) && 
+					(point.y >= cmin.y) && 
+					(point.z >= cmin.z) && 
+					(point.x <= cmax.x) && 
+					(point.y <= cmax.y) && 
+					(point.z <= cmax.z);
+			}
+			bool cubeContainsPoint(Cube cube, vec3 point) {
+				vec3 cmin = cube.center - vec3(cube.a * 0.5);
+				vec3 cmax = cube.center + vec3(cube.a * 0.5);
+				return aabContainsPoint(cmin, cmax, point);
+			}
+			bool rodXContainsPoint(Cube cube, vec3 point) {
+				vec2 cmin = cube.center.yz - vec2(cube.a * 0.5);
+				vec2 cmax = cube.center.yz + vec2(cube.a * 0.5);
+				return
+					(point.y >= cmin.x) && 
+					(point.z >= cmin.y) && 
+					(point.y <= cmax.x) && 
+					(point.z <= cmax.y);
+			}
+			bool rodYContainsPoint(Cube cube, vec3 point) {
+				vec2 cmin = cube.center.xz - vec2(cube.a * 0.5);
+				vec2 cmax = cube.center.xz + vec2(cube.a * 0.5);
+				return
+					(point.x >= cmin.x) && 
+					(point.z >= cmin.y) && 
+					(point.x <= cmax.x) && 
+					(point.z <= cmax.y);
+			}
+			bool rodZContainsPoint(Cube cube, vec3 point) {
+				vec2 cmin = cube.center.xy - vec2(cube.a * 0.5);
+				vec2 cmax = cube.center.xy + vec2(cube.a * 0.5);
+				return
+					(point.x >= cmin.x) && 
+					(point.y >= cmin.y) && 
+					(point.x <= cmax.x) && 
+					(point.y <= cmax.y);
+			}
+			
+			Intersection cubeRayInIf(Cube cube, Ray ray) {
+				if (cubeContainsPoint(cube, ray.eye)) {
+					return Intersection(ray.eye, true);
+				} else {
+					vec3 planes = cube.center - sign(ray.dir) * (cube.a * 0.5);
+					vec4 resx = intersectPlaneX(ray, planes.x);
+					vec4 resy = intersectPlaneY(ray, planes.y);
+					vec4 resz = intersectPlaneZ(ray, planes.z);
+			
+					float maxw = max(max(resx.w, resy.w), resz.w);
+					
+					if (maxw < 0.0) {
+						return FALSE_INTERSECTION;
+					} else {
+						vec2 deltas = abs(vec2(resx.w, resy.w) - vec2(maxw));
+						if (deltas.x < EPSILON) {
+							if (rodXContainsPoint(cube, resx.xyz)) {
+								//gl_FragColor = vec4(1., 0., 0., 1.);
+								return Intersection(resx.xyz, true);
+							} else {
+								return FALSE_INTERSECTION;
+							}
+						} else
+						if (deltas.y < EPSILON) {
+							if (rodYContainsPoint(cube, resy.xyz)) {
+								//gl_FragColor = vec4(0., 1., 0., 1.);
+								return Intersection(resy.xyz, true);
+							} else {
+								return FALSE_INTERSECTION;
+							}
+						} else
+						{
+							if (rodZContainsPoint(cube, resz.xyz)) {
+								//gl_FragColor = vec4(0., 0., 1., 1.);
+								return Intersection(resz.xyz, true);
+							} else {
+								return FALSE_INTERSECTION;
+							}
+						}
+					}
+				}
+			}
+
+			vec3 cubeRayOut(Cube cube, Ray ray) {
+				vec3 planes = cube.center + sign(ray.dir) * (cube.a * 0.5);
+				vec4 resx = intersectPlaneX(ray, planes.x);
+				vec4 resy = intersectPlaneY(ray, planes.y);
+				vec4 resz = intersectPlaneZ(ray, planes.z);
+				float minw = min(min(resx.w, resy.w), resz.w);
+				vec2 deltas = abs(vec2(resx.w, resy.w) - vec2(minw));
+				if (deltas.x < EPSILON) {
+					resx.x += sign(ray.dir.x) * EPSILON;
+					return resx.xyz;
+				} else 
+				if (deltas.y < EPSILON) {
+					resy.y += sign(ray.dir.y) * EPSILON;
+					return resy.xyz;
+				} else
+				{
+					resz.z += sign(ray.dir.z) * EPSILON;
+					return resz.xyz;
+				}
+			}
+
+			IndexIf indexSubcube(vec4 node, vec3 c, vec3 p) {
+				int mask = 255 - int(node.a * 255.0);
+				int cnt = 0;
+				int id = int(dot(step(p, c), vec3(4.0, 2.0, 1.0)));
+				
+				int patt = 128;
+				for (int i = 0; i < 7; i++) {
+					if (i >= id) break;
+					if (mask >= patt) {
+						cnt++;
+						mask -= patt;
+					}
+					patt /= 2;
+				}
+				if (mask >= patt) {
+					return IndexIf(addIndex(indexNode(node.rgb), cnt), true);
+				} else {
+					return FALSE_INDEX;
+				}
+			}
+
+			Cube cubeSplit(Cube cube, vec3 p) {
+				float delta = cube.a * 0.25;
+				cube.a *= 0.5;				
+				cube.center += sign(p - cube.center) * delta;
+				return cube;
+			}
+			
+			void traverse(vec3 point) {
+				traverse_cube = ROOT_CUBE;
+				Index idx = startIndex;
+				
+				if (cubeContainsPoint(traverse_cube, point)) {
+					for (int i = 1; i <= MAX_DEPTH; i++) {
+						traverse_cycles++;
+						vec4 node = indexTex(idx);
+						if (node.a < 1.0) {
+							IndexIf iif = indexSubcube(node, traverse_cube.center, point);
+							traverse_cube = cubeSplit(traverse_cube, point);
+							if (iif.exists) {
+								idx = iif.index;
+							} else {
+								traverse_found = false;
+								traverse_depth = i;
+								return;
+							}
+						} else {
+							traverse_found = true;
+							traverse_color = vec4(node.rgb, 1.0);
+							traverse_depth = i;
+							return;
+						}
+					}
+				}
+				traverse_found = false;
+				traverse_depth = 0;
+			}
+
+			void main(void) {
+				startIndex = Index(vec2(0.5) / uTextureSize);
+				traverse_cycles = 0;
+			
+				Ray ray = Ray(uViewPos, uViewRot * vec3(vPosition, 1.0));
+				ray.dir = normalize(ray.dir);
+				
+				Intersection inters = cubeRayInIf(ROOT_CUBE, ray);
+				//return;
+				if (inters.exists) {
+					ray.eye = inters.point;
+					for (int i = 0; i < MARCH_COUNT; i++) {
+						march_cycles++;
+						traverse(ray.eye);
+						if (traverse_found) {
+							if (SHOW_FRAME) {
+								gl_FragColor = vec4(
+									float(march_cycles) / 30.0,
+									float(traverse_cycles) / 120.0,
+									0.0, 1.0);
+							} else {
+								gl_FragColor = traverse_color;
+							}
+							return;
+						} else {
+							ray.eye = cubeRayOut(traverse_cube, ray);
+							if (!cubeContainsPoint(ROOT_CUBE, ray.eye)) {
+								break;
+							}
+						}
+					}
+				}
+				if (SHOW_FRAME) {
+					gl_FragColor = vec4(
+						float(march_cycles) / 30.0,
+						float(traverse_cycles) / 120.0,
+						0.0, 1.0);
+				} else {
+					//gl_FragColor = BACKGROUND_COLOR;
+					discard;
+				}
+			}
+		</script>
+		
+		<script src="/js/webgl-helper.js"></script>
+		<script src="/js/gl-matrix-min.js"></script>
+		<script>
+			var gl;
+			var vbSprite;
+			var ibSprite;
+			var uIterations = 10;
+			
+			var texOctree;
+			var texSize;
+			
+			var camPos = vec3.create();
+			var camRot = mat3.create();
+			var camAsp = vec3.fromValues(1.25, 1, 1);
+			var camTran = mat4.create();
+			
+			var camAngleTo = vec2.create();
+			var camAngle = vec2.create();
+			
+			var camZoom = 1;
+			var camZoomTo = 1;
+			
+			var mouseLast = vec2.create();
+			
+			var autoRotate = true;
+			
+			var shaderProgram;
+			var shaderId = 0;
+			
+			var canvas;
+
+			var octreeImage;
+			
+			function onClick(event) {
+				// event.offserX
+				// event.offserY
+				if (autoRotate) {
+					autoRotate = false;
+					vec2.copy(camAngleTo, camAngle);
+					camZoomTo = camZoom;
+				}
+				var dx = event.offsetX - canvas.width / 2;
+				var dy = event.offsetY - canvas.height / 2;
+				camAngleTo[0] += dy * 0.01;
+				camAngleTo[1] += dx * 0.01;
+			}
+			
+			function onCheckClick(cb, event) {
+			
+				shaderId = cb.checked ? 0 : 1;
+			}
+			
+			function onWheel(event) {
+				// event.wheelDelta
+				camZoomTo *= Math.pow(0.5, event.wheelDelta / 240);
+				if (camZoomTo > 5) camZoomTo = 5;
+				if (camZoomTo < 0.1) camZoomTo = 0.1;
+			}
+			
+			function onNumberChange(event) {
+				uIterations = Number(event.target.value);
+			}
+			
+			
+			function createOctreeTexture() {
+				texSize = 8;
+				var data = [
+					255, 0, 0, 255-0,
+					1, 0, 0, 255-128-1,
+					3, 0, 0, 255-2,
+					3, 0, 0, 255-64-128,
+					0, 255, 0, 255-0,
+					255, 0, 255, 255-0,
+				];
+				var i;
+				for (i = 0; i < 8*8*4; i++) {
+					data.push(0);
+				}
+				data = new Uint8Array(data);
+				var texture = gl.createTexture();
+				gl.bindTexture(gl.TEXTURE_2D, texture);
+				gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 8, 8, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+				gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+				return texture;
+			}
+			
+			function initCustom() {
+				octreeImg = new Image();
+				octreeImg.onload = function() {
+				
+					var tex = gl.createTexture();
+					
+					gl.bindTexture(gl.TEXTURE_2D, tex);
+					gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+					gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, octreeImg);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+					gl.bindTexture(gl.TEXTURE_2D, null);
+					
+					texOctree = tex;
+					texSize = octreeImg.width;
+				};
+				setTimeout(function(){
+					octreeImg.src = "bunny.png";
+				}, 10);
+				texOctree = createOctreeTexture();
+			}
+
+			
+			function process(currentTime) {
+				if (autoRotate) {
+					camZoom = Math.cos(currentTime*0.00011) * 0.3 + 1;
+					vec2.set(camAngle, currentTime*0.00013, currentTime*0.0003);
+				} else {
+					camZoom += (camZoomTo - camZoom) * 0.1;
+					vec2.lerp(camAngle, camAngle, camAngleTo, 0.1);
+				}
+				
+				vec3.set(camPos, 0, 0, -camZoom);
+				
+				mat4.identity(camTran);
+				mat4.rotateY(camTran, camTran, camAngle[1]);
+				mat4.rotateX(camTran, camTran, camAngle[0]);
+				mat4.translate(camTran, camTran, camPos);
+				mat4.scale(camTran, camTran, camAsp);
+				
+				vec3.set(camPos, 0, 0, 0);
+				vec3.transformMat4(camPos, camPos, camTran);
+				mat3.fromMat4(camRot, camTran);
+			}
+			
+			function drawScene(currentTime) {
+				var i;
+
+				var shader = shaderProgram[shaderId];
+				gl.clearColor(0.0, 0.0, 0.0, 1.0);
+				gl.clear(gl.COLOR_BUFFER_BIT |gl.DEPTH_BUFFER_BIT);
+				
+				gl.useProgram(shader);
+				
+				gl.uniform1i(shader.uIterations, uIterations);
+				
+				gl.activeTexture(gl.TEXTURE0);
+				gl.bindTexture(gl.TEXTURE_2D, texOctree);
+				
+				gl.uniform1i(shader.uTexture, 0);
+				gl.uniform1f(shader.uTextureSize, texSize);
+				
+				
+				
+				gl.uniformMatrix3fv(shader.uViewRot, false, camRot);
+				gl.uniform3fv(shader.uViewPos, camPos);
+				
+				gl.bindBuffer(gl.ARRAY_BUFFER, vbSprite);
+				gl.vertexAttribPointer(shader.aPosition, vbSprite.itemSize, gl.FLOAT, false, 0, 0);
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibSprite);
+				
+				gl.drawElements(gl.TRIANGLES, ibSprite.numItems, gl.UNSIGNED_SHORT, 0);
+			}
+			
+			function init() {
+				canvas = document.getElementById("glcanvas");
+				gl = initGL(canvas);
+				
+				if (gl) {
+					initShaders();
+					initBuffers();
+					initCustom();
+					startAnimation();
+				}
+			}
+			
+			function initGL(canvas) {
+				var gl = GlHelper.initGL(canvas);
+				if (!gl) {
+					alert("Unable to initialize WebGL. Your browser may not support it.");
+					gl = null;
+				}
+				/*
+				if (!gl.getExtension("OES_texture_float")) {
+					alert("This sddemo requires the OES_texture_float extension");
+				}
+				*/
+				gl.disable(gl.DEPTH_TEST);
+				return gl;
+			}
+			
+			function initShaders() {
+				shaderProgram = new Array(2);
+				shaderProgram[0] = GlHelper.getShaderProgram(["shader-vs", "shader-fs"], {SHOW_FRAME: "false"});
+				shaderProgram[1] = GlHelper.getShaderProgram(["shader-vs", "shader-fs"], {SHOW_FRAME: "true"});
+			}
+			
+			function initBuffers() {
+				var vertices = [-1, -1, -1, +1, +1, +1, +1, -1];
+				var indices = [0, 1, 2, 0, 2, 3];
+				
+				vbSprite = gl.createBuffer();
+				gl.bindBuffer(gl.ARRAY_BUFFER, vbSprite);
+				gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+				vbSprite.itemSize = 2;
+				vbSprite.numItems = vertices.length / vbSprite.itemSize;
+				
+				ibSprite = gl.createBuffer();
+				gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibSprite);
+				gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+				ibSprite.numItems = indices.length;
+			}
+			
+			var startTime;
+			function startAnimation() {
+				startTime = +Date.now();
+				scheduleTick();
+			}
+			
+			function scheduleTick() {
+				requestAnimationFrame(tick);
+				//setTimeout(tick, 500);
+			}
+			function tick() {
+				var currentTime = Date.now() - startTime;
+				process(currentTime);
+				drawScene(currentTime);
+				scheduleTick();
+			}
+		</script>		
+	</body>
+</html>
+

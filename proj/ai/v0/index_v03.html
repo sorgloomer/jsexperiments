@@ -1,0 +1,341 @@
+<html>
+<head>
+	<title>ai</title>
+	<style>
+		canvas{border:1px solid 0}
+	</style>
+</head>
+<body>
+	<canvas id="main-canvas" width="640" height="480" onclick="onClick(event);"></canvas>
+	
+	<script src="Vector.js"></script>
+	<script>
+		var canvas, ctx;
+		var world;
+		
+		function onClick(e) {
+			world.sweet.setXY(e.offsetX, e.offsetY);
+		}
+		
+		function initView() {
+			canvas = document.getElementById("main-canvas");
+			ctx = canvas.getContext("2d");
+		};
+		function init() {
+			initView();
+			world = new World();
+			requestAnimated();
+		};
+		function startAnimated() {
+			requestAnimated();
+		};
+		function animated(time) {
+			requestAnimated();
+			tick(time);
+		};
+		function requestAnimated() {
+			window.requestAnimationFrame(animated);
+		};
+		function tick(time) {
+			draw(time);
+			world.step(World.TICK);
+			world.ai();			
+		};
+		
+		CanvasRenderingContext2D.prototype.clear = 
+			CanvasRenderingContext2D.prototype.clear
+			|| function (preserveTransform) {
+			if (preserveTransform) {
+				this.save();
+			}
+			this.setTransform(1, 0, 0, 1, 0, 0);
+			this.clearRect(0, 0, this.canvas.width, this.canvas.height);
+			if (preserveTransform) {
+				this.restore();
+			}           
+		};
+		
+		function draw(time) {
+			ctx.clear();
+			ctx.strokeStyle = "#000000";
+			drawShip(ctx, world.ship);
+			
+			ctx.strokeStyle = "#800000";
+			world.obstacles.forEach(function(o){
+				drawShip(ctx, o);
+			});
+			
+			ctx.fillStyle = "#00a000";
+			ctx.beginPath();
+			ctx.arc(world.sweet.x,world.sweet.y,8,0,Consts.TWO_PI);
+			ctx.fill();
+		};
+		
+		function drawShip(ctx, ship) {
+			var r = ship.rad;
+			ctx.save()
+			ctx.translate(ship.pos.x, ship.pos.y);
+			ctx.rotate(ship.phi);
+			
+			ctx.beginPath();
+			ctx.arc(0,0,r,0,Consts.TWO_PI);
+			ctx.moveTo(0, 0);
+			ctx.lineTo(r, 0);
+			ctx.stroke();
+			ctx.restore();
+		}
+		
+		function Ball(vals) {
+			this.rad = vals?vals.rad:20;
+			this.pos = vals?new Vector(vals.posX, vals.posY):new Vector();
+			this.vel = new Vector();
+			this.phi = 0;
+			this.omega = 0;
+			
+			this.acc = 0;
+			this.beta = 0;
+		};
+		
+		Ball.temp1 = new Vector();
+		
+		Ball.prototype.set = function(o) {
+			this.rad = o.rad;
+			this.pos.set(o.pos);
+			this.vel.set(o.vel);
+			this.phi = o.phi;
+			this.omega = o.omega;
+			
+			this.acc = o.acc;
+			this.beta = o.beta;
+			return this;
+		}
+		Ball.prototype.clone = function() {
+			return new Ball().set(this);
+		}
+		
+		Ball.prototype.step = function(dt) {
+			this.pos.addTo(Ball.temp1.set(this.vel).mulTo(dt));
+			this.vel.addTo(Ball.temp1.setAngle(this.phi).mulTo(this.acc*dt));
+			
+			this.phi += this.omega * dt;
+			this.omega += this.beta * dt;
+		};
+				
+		function World() {
+			var i;
+			this.ship = new Ball();
+			this.width = 640;
+			this.height = 480;
+			this.ship.pos = new Vector(this.width, this.height).mulTo(0.5);
+			this.center = new Vector(this.width/2, this.height/2);
+			this.sweet = this.center.clone();
+			
+			this.obstacles = [];
+			this.obstacles.push(new Ball({rad: 60, posX:this.center.x, posY:this.center.y+220}));
+			this.obstacles.push(new Ball({rad: 60, posX:this.center.x, posY:this.center.y+100}));
+			this.obstacles.push(new Ball({rad: 60, posX:this.center.x, posY:this.center.y-100}));
+			this.obstacles.push(new Ball({rad: 60, posX:this.center.x, posY:this.center.y-220}));
+			this.obstacles.push(new Ball({rad: 30, posX:this.center.x-140, posY:this.center.y}));
+			
+			this.aihist = [];
+			for (i = 0; i < 100; i++) {
+				this.aihist.push(fillWithRandom(new Array(25), World.inputs));
+			}
+		}
+		
+		World.prototype.set = function(o) {
+			var i;
+			this.ship.set(o.ship);
+			this.width = o.width;
+			this.height = o.height;
+			this.center.set(o.center);
+			this.sweet.set(o.sweet);
+			
+			var olen = o.obstacles.length;
+			if (this.obstacles.length !== olen) {
+				this.obstacles = new Array(olen);
+				for (i = 0; i < olen; i++) {
+					this.obstacles[i] = o.obstacles[i].clone();
+				}
+			} else {
+				for (i = 0; i < olen; i++) {
+					this.obstacles[i].set(o.obstacles[i]);
+				}
+			}
+			return this;
+		}
+		World.prototype.clone = function(o) {
+			return new World().set(o);
+		}
+		
+		World.prototype.stepIt = function(dt) {
+			this.ship.step(dt);
+			this._collideBall(this.ship);
+		}
+		World.prototype.step = function(dt) {
+			while (dt > 0.02) {
+				this.stepIt(0.02);
+				dt -= 0.02;
+			}
+			this.stepIt(dt);
+		}
+		
+		World.prototype.input = function(str) {
+			if (str === "l") {
+				this.ship.acc = 0;
+				this.ship.beta = -5;
+			} else if (str === "r") {
+				this.ship.acc = 0;
+				this.ship.beta = +5;
+			} else if (str === "a") {
+				this.ship.acc = 100;
+				this.ship.beta = 0;
+			} else if (str === "al") {
+				this.ship.acc = 100;
+				this.ship.beta = -5;
+			} else if (str === "ar") {
+				this.ship.acc = 100;
+				this.ship.beta = +5;
+			} else {
+				this.ship.acc = 0;
+				this.ship.beta = 0;
+			}
+		}
+				
+		function fillWithRandom(what,withWhat, i, maxi) {
+			i = i || 0;
+			maxi = maxi || what.length;
+			var choices = withWhat.length;
+			for (;i < maxi; i++) {
+				what[i] = withWhat[Math.floor(Math.random() * choices)];
+			}
+			return what;
+		}
+		
+		function arrayCopy(what,withWhat, i, maxi) {
+			i = i || 0;
+			maxi = maxi || what.length;
+			for (;i < maxi; i++) {
+				what[i] = withWhat[i];
+			}
+			return what;
+		}
+
+		
+		World.prototype.scoreState = function() {
+			var self = this;
+			var score = Math.log(this.ship.pos.dist2(this.sweet)+1);
+			var tmp = Math.abs(this.ship.omega);
+			score += tmp*tmp*0.01;
+			score += this.ship.vel.abs() * 0.001;
+			
+			
+			this.obstacles.forEach(function(o){
+				if (self.ship.pos.dist(o.pos) < (o.rad + self.ship.rad)) score += 100000;
+			});
+			return score;
+		}
+		
+		World.prototype.scorePath = function(inputs, draw) {
+			var cdist = 0;
+			var temp1 = World.temp1;
+			temp1.set(this);
+			
+			if (draw) {
+				ctx.beginPath();
+				ctx.moveTo(temp1.ship.pos.x, temp1.ship.pos.y);
+			}
+			
+			inputs.forEach(function(input){
+				var newStyle;
+				temp1.input(input);
+				temp1.step(World.INPUT_TICK);
+				cdist +=  temp1.scoreState();
+				
+				if (draw) {
+					ctx.lineTo(temp1.ship.pos.x, temp1.ship.pos.y);
+				}
+			});
+			if (draw) {
+				ctx.stroke();
+			}
+			return cdist;
+		}
+		
+		World.mutatePath = function(path) {
+			if (Math.random() < 0.1) {
+				var i = Math.floor(Math.random() * path.length);
+				var j = Math.floor(Math.random() * World.inputs.length);
+				path[i] = World.inputs[j];
+			}
+			if (Math.random() < 0.1) {
+				rotateLeft(path);
+			}
+			return path;
+		}
+		
+		function rotateLeft(arr) {
+			var i = 0, maxi = arr.length-1;
+			var tmp = arr[0];
+			for (; i < maxi; i++) {
+				arr[i]=arr[i+1];
+			}
+			arr[maxi] = tmp;
+		}
+		World.prototype.ai = function() {					
+			var self = this;
+			var i, halfi;
+			var besti, randi;
+			
+			i = 0;
+			besti = (this.aihist.length*0.55)>>0;
+			randi = (this.aihist.length*0.65)>>0;
+			
+			this.aihist.forEach(function(path){
+				if (i < besti) {
+					World.mutatePath(path);
+				} else if (i < randi) {
+					arrayCopy(path, self.aihist[Math.floor(Math.random() * besti)]);
+				} else {
+					fillWithRandom(path, World.inputs);
+				}
+				path.score = self.scorePath(path);
+				i++;
+			});
+			
+			
+			this.aihist.sort(function(a,b){return a.score-b.score;});
+			this.input(this.aihist[0][0]);
+			
+			ctx.save();
+			for (i=0;i<this.aihist.length;i++) {
+				var current = this.aihist[i];
+				ctx.strokeStyle = "rgba("+(current.score*0.2 | 0)+",0,"+(512-current.score*0.2 | 0)+",0.5)";
+				ctx.beginPath();
+				this.scorePath(current,true);
+				ctx.stroke();
+			}
+			ctx.restore();
+		};
+		
+		World.prototype._collideBall = function(ball) {
+			if (ball.pos.x < ball.rad && ball.vel.x < 0) ball.vel.x = ball.vel.x * -0.2;
+			if (ball.pos.x > this.width-ball.rad && ball.vel.x > 0) ball.vel.x = ball.vel.x * -0.2;
+			if (ball.pos.y < ball.rad && ball.vel.y < 0) ball.vel.y = ball.vel.y * -0.2;
+			if (ball.pos.y > this.height-ball.rad && ball.vel.y > 0) ball.vel.y = ball.vel.y * -0.2;
+		};
+		
+		World.inputs = ["","l","r","a","al","ar"];
+		World.temp_input_array = new Array(25);
+		World.TICK = 0.02;
+		World.INPUT_TICK = 0.2;
+		World.AI_PATHS = 20;
+		World.temp1 = new World();
+		World.temp2 = new World();
+		
+		init();
+	</script>
+</body>
+</html>
+
+

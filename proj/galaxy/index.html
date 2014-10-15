@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Octree volumetric fog renderer (Galaxy)</title>
+	</head>
+	<body onload="init();">
+		<canvas id="glcanvas" width="800" height="600" onclick="onClick(event);" onmousewheel="onWheel(event);" >
+			Your browser doesn't appear to support the HTML5 <code>&lt;canvas&gt;</code> element.
+		</canvas>
+		<div id="info1"></div>
+		<div id="info2"></div>
+				
+		<script id="shader-v" type="x-shader/x-vertex"
+			data-attribs="aPositionSize,aColor"
+			data-uniforms="uMVP,uResolution">
+			precision highp float;
+			attribute vec4 aPositionSize;
+			attribute vec4 aColor;
+			
+			uniform vec2 uResolution;
+			uniform mat4 uMVP;
+			varying vec4 vColor;
+			void main() {
+				vColor = aColor;
+				vColor.w *= aPositionSize.w;
+				gl_Position = uMVP * vec4(aPositionSize.xyz, 1.0);
+				gl_PointSize = 1.5 * aPositionSize.w * uResolution.y / gl_Position.w;
+			}
+		</script>
+		<script id="shader-f" type="x-shader/x-fragment"
+			data-uniforms="uTexture">
+			precision mediump float;
+			uniform sampler2D uTexture;
+			varying vec4 vColor;
+			void main() {
+				//vec2 p = gl_PointCoord * 2.0 - vec2(1.0);
+				//float d = min(1.0, dot(p,p));
+				gl_FragColor = vColor;
+				//gl_FragColor.a *= (1.0-d)*0.5;
+			}
+		</script>
+		
+		<script src="/js/webgl-helper.js"></script>
+		<script src="/js/gl-matrix-min.js"></script>
+		<script src="Billboard.js"></script>
+		<script src="Octree.js"></script>
+		<script>
+			var gl, billboard, octree;
+			var tmp = vec3.create();
+			var tmpm = mat3.create();
+			var fps = 0, fpsCounter = 0, fpsTick = +Date.now();
+			
+			var res = {
+				texGlow: null,
+			};
+			
+			var cam = {
+				pos: vec3.create(),
+				rot: mat3.create(),
+				asp: vec3.fromValues(1.25, 1, 1),
+				tran: mat4.create(),
+				mvp: mat4.create(),
+				angle: vec2.create(),
+				angleTo: vec2.create(),
+				zoom: 1,
+				zoomTo: 1,
+				autoRotate: true,
+			};
+			
+			var canvas;
+
+			function onClick(event) {
+				var lcam = cam;
+				// event.offserX
+				// event.offserY
+				if (lcam.autoRotate) {
+					lcam.autoRotate = false;
+					vec2.copy(lcam.angleTo, lcam.angle);
+					lcam.zoomTo = lcam.zoom;
+				}
+				var dx = event.offsetX - canvas.width / 2;
+				var dy = event.offsetY - canvas.height / 2;
+				cam.angleTo[0] += dy * 0.01;
+				cam.angleTo[1] += dx * 0.01;
+			}
+			
+			function onWheel(event) {
+				// event.wheelDelta
+				cam.zoomTo *= Math.pow(0.5, event.wheelDelta / 120 / 3);
+				if (cam.zoomTo > 10) cam.zoomTo = 10;
+				if (cam.zoomTo < 0.2) cam.zoomTo = 0.2;
+			}
+			
+			function loadTexture(path) {
+				var img = new Image();
+				var tex = {width:img.width, height:img.height, id: null};
+				img.onload = function() {
+					var tid = gl.createTexture();
+
+					gl.bindTexture(gl.TEXTURE_2D, tid);
+					gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+					gl.texImage2D(
+						gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,
+						gl.UNSIGNED_BYTE, img);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+					gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+					gl.bindTexture(gl.TEXTURE_2D, null);
+					tex.id = tid;
+				};
+				img.src = path;
+				return tex;
+			}
+			
+			function initCustom() {
+				billboard = new Billboard(canvas);
+				res.texGlow = loadTexture("glow.png");
+				octree = new Octree(function(p,s){
+					var r = p[0]*p[0] + p[1]*p[1] + p[2]*p[2];
+					var q = p[0]*p[1]*p[2] * 16*16;
+					q *= q;
+					q = Math.min(1, q);
+					q = Math.max(0, q);
+					//TODO
+					r = (0.2 - r) * 4;
+					r *= r;
+					r *= 8;
+					return Math.max(0, 1-r)*(1-q);
+				});
+			};
+
+			function processView(currentTime) {
+				if (cam.autoRotate) {
+					cam.zoom = Math.cos(currentTime*0.00011) * 0.6 + 1;
+					vec2.set(cam.angle, currentTime*0.00013, currentTime*0.0003);
+				} else {
+					cam.zoom += (cam.zoomTo - cam.zoom) * 0.03;
+					vec2.lerp(cam.angle, cam.angle, cam.angleTo, 0.03);
+				}
+				
+				vec3.set(cam.pos, 0, 0, -cam.zoom);
+				
+				mat4.identity(cam.tran);
+				mat4.translate(cam.tran, cam.tran, cam.pos);
+				mat4.rotateX(cam.tran, cam.tran, cam.angle[0]);
+				mat4.rotateY(cam.tran, cam.tran, cam.angle[1]);
+				
+				mat3.fromMat4(cam.rot, cam.tran);
+				mat3.transpose(cam.rot, cam.rot);
+				vec3.transformMat3(cam.pos, cam.pos, cam.rot);
+				vec3.negate(cam.pos, cam.pos);
+				
+				mat4.perspective(cam.mvp, 1.05, 1.25, 0.1, 1000.0);
+				mat4.mul(cam.mvp, cam.mvp, cam.tran);
+			}
+			
+			function processFps() {
+				fpsCounter++;
+				if (fpsCounter >= 10) {
+					var now = +Date.now();
+					fps = 10000 / (now - fpsTick);
+					fpsTick = now;
+					fpsCounter = 0;
+				}
+			}
+			
+			function process(currentTime) {
+				processView(currentTime);
+				processFps();
+			}
+			
+			function drawScene(currentTime) {
+				gl.clearColor(0.2, 0.1, 0.0, 1.0);
+				gl.clear(gl.COLOR_BUFFER_BIT |gl.DEPTH_BUFFER_BIT);
+
+				tmp[0]=-cam.tran[2];
+				tmp[1]=-cam.tran[6];
+				tmp[2]=-cam.tran[10];
+				octree.update(billboard,cam.pos,tmp);
+				
+				document.getElementById("info1").innerHTML =
+					"Particles: "+octree.activeNodeCount;
+				document.getElementById("info2").innerHTML =
+					"FPS: " + (((fps*10)|0)/10);
+			}
+			
+			function init() {
+				canvas = document.getElementById("glcanvas");
+				gl = initGL(canvas);
+				
+				if (gl) {
+					initCustom();
+					startAnimation();
+				}
+			}
+			
+			function initGL(canvas) {
+				var gl = GlHelper.initGL(canvas);
+				if (!gl) {
+					alert("Unable to initialize WebGL. Your browser may not support it.");
+					gl = null;
+				}
+				gl.disable(gl.DEPTH_TEST);
+				gl.depthMask(false);
+				gl.enable(gl.BLEND);
+				return gl;
+			}
+									
+			var startTime;
+			function startAnimation() {
+				startTime = +Date.now();
+				scheduleTick();
+			}
+			
+			function scheduleTick() {
+				requestAnimationFrame(tick);
+				//setTimeout(tick, 500);
+			}
+			function tick() {
+				var currentTime = Date.now() - startTime;
+				process(currentTime);
+				drawScene(currentTime);
+				scheduleTick();
+			}
+		</script>		
+	</body>
+</html>
+
